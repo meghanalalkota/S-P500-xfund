@@ -1,0 +1,236 @@
+import pandas as pd
+import numpy as np
+import datetime as dt
+
+# Read monthly stock file
+msf = pd.read_csv('msf_6123.csv')
+
+# Format date variable
+msf['date'] = pd.to_datetime(msf['date'], format='%Y%m%d')
+msf['year'] = msf['date'].dt.year
+msf['quarter'] = msf['date'].dt.quarter
+msf['month'] = msf['date'].dt.month
+
+# Market Cap
+msf['MC'] = msf.prc*msf.shrout/1000
+
+# Begin-of-month MC (as portfolio weights)
+msf['MC_beg'] = msf.groupby('permno')['MC'].shift(1)
+
+# Read predictive signals updated at calendar quarter-end, as well as variables for liquidity screen
+signals = pd.read_csv('signals_quarterly.csv')
+
+# Format date variable
+signals['date'] = pd.to_datetime(signals['date'], format='%Y%m%d')
+signals['year'] = signals['date'].dt.year
+signals['quarter'] = signals['date'].dt.quarter
+
+# Variables
+# date ~ last trading day in a calendar quarter (consistent with date in msf)
+# prc ~ share price (at quarter-end)
+# DTV ~ average daily trading volume ($Mil) druing the past 6 months
+# MC ~ market capitalization (at quarter-end)
+# BM ~ book-to-market (updated using the latest quarterly accounting statements and ME)
+# R11 ~ momentum (past 12-to-2-month cumulative return)
+# IA ~ investment-to-asssets (4-quarter asset growth using the latest quarterly accounting statements)
+# ROE ~ return on equity (based on the most recent announced quarterly earnings report)
+# beta ~ market beta (based on returns during the past 60 months)
+print(signals)
+
+# For the signals, be clear about whether it "positively" or "negatively" predicts future returns
+# positively: BM, R11, ROE
+# negatively: MC, IA
+# ambiguous but helps control risk: beta
+
+# Identify the top-1000 stocks by MC
+# At each quarter-end, rank stocks by MC from largest to smallest
+sample1['rank_MC'] = sample1.groupby('date').MC.rank(ascending=False)
+sample1['rank_MC'] = sample1.rank_MC.astype(int)
+
+
+# Identify the top-1000 stocks by trading volume
+# At each quarter-end, rank stocks by DTV from highest to lowest
+sample1['rank_DTV'] = sample1.groupby('date').DTV.rank(ascending=False)
+sample1['rank_DTV'] = sample1.rank_DTV.astype(int)
+
+print(sample1.head())
+sample1 = sample1[(sample1.rank_DTV<=1000) & (sample1.rank_MC<=1000)]
+
+sample1
+
+nstocks = sample1.groupby('date').permno.count()
+nstocks.describe()
+# When you rank stocks, use a consistent convention: "small ranking -> high return" (ranking 1 is the best)
+# If a signal positively predicts returns, use rank(ascending=False) to favor high values of signal
+# If a signal negatively predicts returns, use rank(ascending=True) to favor low values of signal
+
+# At each quarter-end, rank stocks by R11 from highest to lowest
+sample1['rank_R11'] = sample1.groupby('date').R11.rank(ascending=False)
+sample1['rank_R11'] = sample1.rank_R11.astype(int)
+
+# Select the top 100 stocks by R11
+# Rename year/quarter to "rebalance/ranking" year/quarter
+sample2 = sample1[sample1.rank_R11<=100].rename(columns={'year':'ryear','quarter':'rquarter'}).reset_index(drop=True)
+
+# Identify the top-1000 stocks by ROE
+# At each quarter-end, rank stocks by ROE from largest to smallest
+sample1['rank_ROE'] = sample1.groupby('date').ROE.rank(ascending=False)
+sample1['rank_ROE'] = sample1.rank_ROE.astype(int)
+
+sample2 = sample1[sample1.rank_ROE<=100].rename(columns={'year':'ryear','quarter':'rquarter'}).reset_index(drop=True)
+
+print(sample2[sample2.date=='2023-12-31'])
+
+ret = msf[['permno','year','quarter','month','ret','MC_beg']][msf.year>=1992].reset_index(drop=True)
+
+# Drop obs. with missing monthly returns or MC_beg
+ret = ret[ret.ret.notna() & ret.MC_beg.notna()].reset_index(drop=True)
+
+# Fund rebalancing/ranking year/quarter
+# Lag year-quarter in monthly return files by 1 quarter (becuase that's when we chose the 100 stocks)
+ret.loc[ret.quarter>1,'ryear'] = ret.year
+ret.loc[ret.quarter>1,'rquarter'] = ret.quarter-1
+
+ret.loc[ret.quarter==1,'ryear'] = ret.year-1
+ret.loc[ret.quarter==1,'rquarter'] = 4
+
+print(ret)
+# Merge quarter-end sample with monthly returns during the coming quarter
+ret2 = pd.merge(ret, sample2[['permno','ryear','rquarter']], on=['permno','ryear','rquarter'])
+
+print(ret2)
+# Weighted Average Function
+def wt_avg(data, var_name, wt_name):
+    
+    d = data[var_name]
+    w = data[wt_name]
+    
+    wt_avg = (d * w).sum() / w.sum()
+    n = d.count()
+    
+    try:
+        return pd.Series([wt_avg, n])
+    except ZeroDivisionError:
+        return np.nan
+
+# Value-weigthed fund portfolio return
+ret_fund = ret2.groupby(['year','month'])\
+               .apply(wt_avg, 'ret', 'MC_beg').reset_index()\
+               .rename(columns={0:'ret_vw', 1:'nstocks'})
+
+ret_fund.nstocks = ret_fund.nstocks.astype(int)
+ret_fund = ret_fund[['year','month','nstocks','ret_vw']]
+
+print(ret_fund)
+ret_fund.describe()
+ret_fund['logret_vw'] = np.log(1+ret_fund.ret_vw)
+ret_fund_ann = ret_fund.groupby(['year'])['logret_vw'].sum().reset_index()
+ret_fund_ann['ret_vw'] = np.exp(ret_fund_ann.logret_vw)-1
+
+# Summary Stats
+ret_fund_ann.ret_vw.describe()
+sample1 = sample1.rename(columns={'year':'ryear','quarter':'rquarter'})
+print(sample1)
+ret1 = pd.merge(ret, sample1[['permno','ryear','rquarter']], on=['permno','ryear','rquarter'])
+
+print(ret1)
+# Value-weigthed index portfolio return
+ret_indx = ret1.groupby(['year','month'])\
+               .apply(wt_avg, 'ret', 'MC_beg').reset_index()\
+               .rename(columns={0:'ret_vw', 1:'nstocks'})
+
+ret_indx.nstocks = ret_indx.nstocks.astype(int)
+ret_indx = ret_indx[['year','month','nstocks','ret_vw']]
+
+print(ret_indx)
+# Compounded returns within each calendar year
+# Calculate the compounded return by summing up log returns and taking exp
+ret_indx['logret_vw'] = np.log(1+ret_indx.ret_vw)
+ret_indx_ann = ret_indx.groupby(['year'])['logret_vw'].sum().reset_index()
+ret_indx_ann['ret_vw'] = np.exp(ret_indx_ann.logret_vw)-1
+
+# Summary Stats
+ret_indx_ann.ret_vw.describe()
+# Plot a bar chart for the time series
+ret_fund_ann.plot(kind='bar', figsize=(10,5), x='year', y='ret_vw', ylim=(-0.7, 1.0), legend= False,\
+                  title='Annual Returns of the  Factor Fund (1992-2023) \n');
+msi = pd.read_csv('msi_6123.csv')
+
+# Calculate the compounded return by summing up log returns and taking exp
+msi['logrf'] = np.log(1+msi.rf)
+rf_ann = msi.groupby(['year'])['logrf'].sum().reset_index()
+rf_ann['rf'] = np.exp(rf_ann.logrf)-1
+
+print(rf_ann)
+# Excess annual returns for the factor fund and the benchmark index
+ret_fund_ann = pd.merge(ret_fund_ann, rf_ann, on=['year'])
+ret_fund_ann['exret_vw'] = ret_fund_ann.ret_vw-ret_fund_ann.rf
+
+# Mean, Volatility, and the Sharpe ratio
+print("Average annual return of Factor Fund (%):", "{:.2f}".format(ret_fund_ann.ret_vw.mean()*100))
+print("Annual volatility of Factor Fund (%) (%):", "{:.2f}".format(ret_fund_ann.ret_vw.std()*100))
+print("Annual Sharpe Ratio of Factor Fund:", "{:.2f}".format(ret_fund_ann.exret_vw.mean()/ret_fund_ann.exret_vw.std()))
+ret_indx_ann = pd.merge(ret_indx_ann, rf_ann, on=['year'])
+ret_indx_ann['exret_vw'] = ret_indx_ann.ret_vw-ret_indx_ann.rf
+
+# Mean, Volatility, and the Sharpe ratio
+print("Average annual return of Benchmark Index (%):", "{:.2f}".format(ret_indx_ann.ret_vw.mean()*100))
+print("Annual volatility of Benchmark Index (%) (%):", "{:.2f}".format(ret_indx_ann.ret_vw.std()*100))
+print("Annual Sharpe Ratio of Benchmark Index:", "{:.2f}".format(ret_indx_ann.exret_vw.mean()/ret_indx_ann.exret_vw.std()))
+# Past 1-year compounded returns
+print("1-year compounded annual return of Factor Fund (%):",\
+      "{:.2f}".format(((np.exp(ret_fund_ann[ret_fund_ann.year==2023].logret_vw.sum())**(1))-1)*100))
+print("1-year compounded annual return of Benchmark Index (%):",\
+      "{:.2f}".format(((np.exp(ret_indx_ann[ret_indx_ann.year==2023].logret_vw.sum())**(1))-1)*100))
+# Past 3-year compounded returns
+print("3-year compounded annual return of Factor Fund (%):",\
+      "{:.2f}".format(((np.exp(ret_fund_ann[ret_fund_ann.year>=2020].logret_vw.sum())**(1/3))-1)*100))
+print("3-year compounded annual return of Benchmark Index (%):",\
+      "{:.2f}".format(((np.exp(ret_indx_ann[ret_indx_ann.year>=2020].logret_vw.sum())**(1/3))-1)*100))
+# Past 5-year compounded returns
+print("5-year compounded annual return of Factor Fund (%):",\
+      "{:.2f}".format(((np.exp(ret_fund_ann[ret_fund_ann.year>=2018].logret_vw.sum())**(1/5))-1)*100))
+print("5-year compounded annual return of Benchmark Index (%):",\
+      "{:.2f}".format(((np.exp(ret_indx_ann[ret_indx_ann.year>=2018].logret_vw.sum())**(1/5))-1)*100))
+# Past 10-year compounded returns
+print("10-year compounded annual return of Factor Fund (%):",\
+      "{:.2f}".format(((np.exp(ret_fund_ann[ret_fund_ann.year>=2013].logret_vw.sum())**(1/10))-1)*100))
+print("10-year compounded annual return of Benchmark Index (%):",\
+      "{:.2f}".format(((np.exp(ret_indx_ann[ret_indx_ann.year>=2013].logret_vw.sum())**(1/10))-1)*100))
+# Past 30-year compounded returns
+print("30-year compounded annual return of Factor Fund (%):",\
+      "{:.2f}".format(((np.exp(ret_fund_ann[ret_fund_ann.year>=1993].logret_vw.sum())**(1/30))-1)*100))
+print("30-year compounded annual return of Benchmark Index (%):",\
+      "{:.2f}".format(((np.exp(ret_indx_ann[ret_indx_ann.year>=1993].logret_vw.sum())**(1/30))-1)*100))
+# Read the FF3 factors from the lab session
+FF3 = pd.read_csv('FF3_lab.csv')
+
+# Merge
+reg_fund = pd.merge(ret_fund, FF3, on=['year','month'])
+
+# Excess fund return
+reg_fund['exret_vw'] = reg_fund.ret_vw-reg_fund.rf
+# Linear regression from statsmodels
+import statsmodels.formula.api as sm
+
+# CAPM
+ols_capm = sm.ols('exret_vw ~ MKT', data=reg_fund)
+est_capm = ols_capm.fit()
+print(est_capm.summary())
+# FF3
+ols_ff3 = sm.ols('exret_vw ~ MKT+SMB+HML', data=reg_fund)
+est_ff3 = ols_ff3.fit()
+print(est_ff3.summary())
+# End-of-2023 portfolio weights
+top = sample2[['permno','MC','rank_R11']][(sample2.ryear==2023) & (sample2.rquarter==4)]
+
+# VW
+top['wt'] = top.MC/top.MC.sum()
+
+# Merge with stock ticker
+ticker = msf[(msf.year==2023) & (msf.month==12)][['permno','ticker']]
+top = pd.merge(top, ticker, on=['permno'])
+
+# Sort stocks from highest to lowest portfolio weight
+top = top.sort_values('wt', ascending=False).reset_index(drop=True)
+top.head(10)
